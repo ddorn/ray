@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
+import profile
 
 import pygame
 import numpy as np
 
+ALL_NORMALS = False
 
 def pd(*v):
     print(*v)
@@ -14,7 +16,7 @@ def vec(x, y, z):
 
 
 def norm(v):
-    return np.sqrt(np.sum(v ** 2, axis=-1))
+    return np.sqrt(np.einsum('...k,...k->...', v, v))
 
 
 def dst_sphere(p: np.array, center: np.array, radius: float):
@@ -23,7 +25,7 @@ def dst_sphere(p: np.array, center: np.array, radius: float):
 
 def dst_cube(p: np.array, center, size):
     offset = abs(p - center) - size
-    return norm(np.max(offset, 0)) + np.max(np.min(offset, 0))
+    return norm(np.maximum(offset, 0)) + np.max(np.minimum(offset, 0))
 
 
 class Camera:
@@ -36,11 +38,11 @@ class Camera:
         self.bottomleft = vec(-2, -1, -1)
         self.horizontal = vec(4, 0, 0)
         self.vertical = vec(0, 2, 0)
-        self.origin = vec(0, 1, 0)
+        self.origin = vec(0, 0, 0)
 
     def genRays(self, reso):
         x = np.linspace(0, 1, reso[0])
-        y = np.linspace(0, 1, reso[1])
+        y = np.linspace(1, 0, reso[1])
         ys, xs = np.meshgrid(y, x)
         a = self.horizontal * np.array(xs)[:, :, None]
         b = self.vertical * np.array(ys)[:, :, None]
@@ -54,27 +56,71 @@ class Camera:
 
 
 def color(points, directions, dist_func):
-    img = np.zeros(points.shape)
+    assert points.shape == directions.shape
 
-    # running = np.ones(points.shape)
+    EPS = 0.0001
+    HIT = 0.001
+    shape = points.shape
+
+    running = np.ones(shape[:-1], dtype=np.bool)
 
     dists = dist_func(points)
-    print(points.shape, dists.shape, directions.shape)
-    while np.any((0.01 < dists) & (dists < 12)):
-        points += dists[:, :, None] * directions
-        dists = dist_func(points)
+    steps = np.zeros(shape[:-1], dtype=np.int)
 
-    img[dists < 0.01] = (255, 169, 0)
-    return img
+    i = 0
+    while np.any(running):
 
+        points[running] += dists[running, None] * directions[running]
+        dists[running] = dist_func(points[running])
+
+        running = (HIT < dists) & (dists < 3)
+        steps += running
+
+        print(i, np.sum(running))
+        i += 1
+
+
+    if not ALL_NORMALS:
+        hits = dists < HIT
+        normals = vec(0, 1 - 0.647, 1)[None, :].repeat(shape[0] * shape[1], axis=0).reshape(shape)
+        normals[hits] = dists[hits, None]
+        normals[hits, 0] -= dist_func(points[hits] + vec(EPS, 0, 0))
+        normals[hits, 1] -= dist_func(points[hits] + vec(0, EPS, 0))
+        normals[hits, 2] -= dist_func(points[hits] + vec(0, 0, EPS))
+        normals[hits] /= norm(normals[hits])[:, None]
+
+
+        img = (255 * (0.5 + 0.5 * normals + steps[..., None] / steps.max())).astype(int)
+
+    else:
+        normals = np.zeros(shape)
+        normals[:] = dists[:, :, None]
+        normals[:, :, 0] -= dist_func(points + vec(EPS, 0, 0))
+        normals[:, :, 1] -= dist_func(points + vec(0, EPS, 0))
+        normals[:, :, 2] -= dist_func(points + vec(0, 0, EPS))
+        normals /= norm(normals)[:, :, None]
+
+        img = (255 * (0.5 + 0.5 * normals)).astype(int)
+
+    return np.minimum(img, 255)
+
+def intersect(d1, d2):
+    return np.maximum(d1, d2)
+
+def union(d1, d2):
+    return np.minimum(d1, d2)
+
+def substraction(d1, d2):
+    return np.maximum(d1, -d2)
 
 def dst_function(p):
-    return np.minimum(
-        np.minimum(
-            dst_sphere(p, vec(-1, 0, -2), 0.5),
-            dst_sphere(p, vec(0, 0, -2), 0.5)
+    # return dst_cube(p, vec(0.7, 0.7, -2), 0.5)
+    return substraction(
+        intersect(
+            dst_sphere(p, vec(0, 0, -2), 0.5),
+            dst_cube(p, vec(0, 0, -2), 0.4)
         ),
-        dst_sphere(p, vec(1, 0, -2), 0.5),
+        dst_sphere(p, vec(0, 0, -2), 0.45)
     )
 
 

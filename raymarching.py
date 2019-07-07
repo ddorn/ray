@@ -4,68 +4,32 @@ import profile
 import pygame
 import numpy as np
 
+
+from camera import Camera
+from distances import *
+from objects import Sphere, Cube
+
 ALL_NORMALS = False
 
-def pd(*v):
-    print(*v)
-    return v
-
+pygame.init()
+# noinspection PyArgumentList
+pygame.key.set_repeat(100, 30)
 
 def vec(x, y, z):
     return np.array((x, y, z), dtype=np.float)
 
 
-def norm(v):
-    return np.sqrt(np.einsum('...k,...k->...', v, v))
-
-
-def dst_sphere(p: np.array, center: np.array, radius: float):
-    return norm(p - center) - radius
-
-
-def dst_cube(p: np.array, center, size):
-    offset = abs(p - center) - size
-    return norm(np.maximum(offset, 0)) + np.max(np.minimum(offset, 0))
-
-
-class Camera:
-    bottomleft: vec
-    horizontal: vec
-    vertical: vec
-    origin: vec
-
-    def __init__(self):
-        self.bottomleft = vec(-2, -1, -1)
-        self.horizontal = vec(4, 0, 0)
-        self.vertical = vec(0, 2, 0)
-        self.origin = vec(0, 0, 0)
-
-    def genRays(self, reso):
-        x = np.linspace(0, 1, reso[0])
-        y = np.linspace(1, 0, reso[1])
-        ys, xs = np.meshgrid(y, x)
-        a = self.horizontal * np.array(xs)[:, :, None]
-        b = self.vertical * np.array(ys)[:, :, None]
-        directions = a + b + (self.bottomleft - self.origin)
-        origin = self.origin[None, :].repeat(reso[0] * reso[1], axis=0).reshape(reso + (3,))
-
-        directions /= norm(directions[:, :, None])
-
-        assert origin.shape == directions.shape == (reso + (3,))
-        return origin, directions
-
-
-def color(points, directions, dist_func):
+def march(points, directions, dist_func):
     assert points.shape == directions.shape
 
-    EPS = 0.0001
+    EPS = 0.00001
     HIT = 0.001
     shape = points.shape
 
     running = np.ones(shape[:-1], dtype=np.bool)
 
     dists = dist_func(points)
-    steps = np.zeros(shape[:-1], dtype=np.int)
+    steps = np.zeros(shape[:-1], dtype=np.float)
 
     i = 0
     while np.any(running):
@@ -82,15 +46,18 @@ def color(points, directions, dist_func):
 
     if not ALL_NORMALS:
         hits = dists < HIT
-        normals = vec(0, 1 - 0.647, 1)[None, :].repeat(shape[0] * shape[1], axis=0).reshape(shape)
+        # normals = vec(0, 1 - 0.647, 1)[None, :].repeat(shape[0] * shape[1], axis=0).reshape(shape)
+        normals = np.zeros(shape)
         normals[hits] = dists[hits, None]
-        normals[hits, 0] -= dist_func(points[hits] + vec(EPS, 0, 0))
-        normals[hits, 1] -= dist_func(points[hits] + vec(0, EPS, 0))
-        normals[hits, 2] -= dist_func(points[hits] + vec(0, 0, EPS))
+        normals[hits, 0] = dist_func(points[hits] - vec(EPS, 0, 0)) - dist_func(points[hits] + vec(EPS, 0, 0))
+        normals[hits, 1] = dist_func(points[hits] - vec(0, EPS, 0)) - dist_func(points[hits] + vec(0, EPS, 0))
+        normals[hits, 2] = dist_func(points[hits] - vec(0, 0, EPS)) - dist_func(points[hits] + vec(0, 0, EPS))
         normals[hits] /= norm(normals[hits])[:, None]
 
-
-        img = (255 * (0.5 + 0.5 * normals + steps[..., None] / steps.max())).astype(int)
+        # steps /= steps.max()
+        # steps **= 3
+        # steps[steps < 0.3] = 0
+        # img = (255 * (0.5 + 0.5 * normals)).astype(int)
 
     else:
         normals = np.zeros(shape)
@@ -100,45 +67,61 @@ def color(points, directions, dist_func):
         normals[:, :, 2] -= dist_func(points + vec(0, 0, EPS))
         normals /= norm(normals)[:, :, None]
 
-        img = (255 * (0.5 + 0.5 * normals)).astype(int)
+        # img = (255 * (0.5 + 0.5 * normals)).astype(int)
 
-    return np.minimum(img, 255)
+    return points, normals, steps
 
-def intersect(d1, d2):
-    return np.maximum(d1, d2)
-
-def union(d1, d2):
-    return np.minimum(d1, d2)
-
-def substraction(d1, d2):
-    return np.maximum(d1, -d2)
 
 def dst_function(p):
-    # return dst_cube(p, vec(0.7, 0.7, -2), 0.5)
+    disp = lambda p: 0.25 * np.sin(5 * p[..., 0]) * np.sin(p[...,1] * 5) * np.sin(p[...,2] * 5) #+ 0.1 * np.sin(p[...,2])
+
+    scene = Sphere((0, 0, -4), 1) + Cube((0, 0, -4), 0.8) - 0.2
+    # scene = Cube((0, 0, -4), 0.8) - 0.2 - Sphere((0, 0, -4), 1.2)
+    return scene.dst(p)
+
+    return dst_sphere(p, vec(0, 0, -2), 0.5)
     return substraction(
         intersect(
-            dst_sphere(p, vec(0, 0, -2), 0.5),
-            dst_cube(p, vec(0, 0, -2), 0.4)
+            dst_sphere(p, vec(0, 0, -4), 1),
+            dst_cube(p, vec(0, 0, -4), 0.8)
         ),
-        dst_sphere(p, vec(0, 0, -2), 0.45)
+        dst_sphere(p, vec(0, 0, -4), 0.95)
     )
 
 
+def draw_image(camera, scene, dst):
+    point, direction = camera.genRays(dst.get_size())
+    points, normals, steps = march(point, direction, scene)
+    hits = norm(normals) > 0
+
+    # find intensity of light
+    ambiant = 0.1
+    light_pos = vec(1, 1, 1) * 10
+
+    light_dir = unit(points - light_pos)
+
+    diffuse = np.maximum(np.einsum('ijk,ijk->ij', normals, light_dir), 0)
+
+    color = (diffuse)[..., None] * vec(1, 0, 0)
+    color[hits] += vec(0.1, 0, 0)
+    img = (255 * color).astype(int)
+    img = np.minimum(img, 255)
+
+    pygame.surfarray.pixels3d(dst)[:] = img
+
+
 def main():
-    SIZE = 800, 400
+    SIZE = 1920, 1080
+    FACTOR = 5
+
+    SMALL_STEP = 0.1
 
     screen: pygame.SurfaceType = pygame.display.set_mode(SIZE)
-    camera = Camera()
+    surf = pygame.Surface((SIZE[0] // FACTOR, SIZE[1] // FACTOR))
+    camera = Camera(50, vec(0, 0, 0), vec(0, 0, -4), vec(0, 1, 0), SIZE[1]/SIZE[0])
 
-    point, direction = camera.genRays(SIZE)
-    img = color(point, direction, dst_function)
-
-    # img **= 3
-    # img[img < 0.3] = 0
-    # print(img.max())
-    # img = img * 255 / img.max()
-    # img = np.repeat(img.astype(np.int), 3).reshape(SIZE + (3,))
-    pygame.surfarray.pixels3d(screen)[::] = img
+    draw_image(camera, dst_function, surf)
+    pygame.transform.scale(surf, SIZE, screen)
 
     stop = False
     while not stop:
@@ -147,7 +130,30 @@ def main():
                 stop = True
             if e.type == pygame.KEYDOWN:
                 if e.key == pygame.K_ESCAPE:
-                    stop = True
+                    return
+                elif e.key == pygame.K_d:
+                    camera.move((SMALL_STEP, 0, 0))
+                elif e.key == pygame.K_a:
+                    camera.move((-SMALL_STEP, 0, 0))
+                elif e.key == pygame.K_w:
+                    camera.move((0, SMALL_STEP, 0))
+                elif e.key == pygame.K_s:
+                    camera.move((0, -SMALL_STEP, 0))
+                elif e.key == pygame.K_f:
+                    camera.move((0, 0, SMALL_STEP))
+                elif e.key == pygame.K_r:
+                    camera.move((0, 0, -SMALL_STEP))
+                elif e.key == pygame.K_SPACE:
+                    camera = Camera(50, vec(0, 0, 0), vec(0, 0, -2), vec(0, 1, 0), 0.5)
+                elif e.unicode.isdigit():
+                    FACTOR = int(e.unicode) + 1
+                    surf = pygame.Surface((SIZE[0] // FACTOR, SIZE[1] // FACTOR))
+                elif e.key == pygame.K_p:
+                    pygame.image.save(screen, 'screenshot.png')
+                    continue
+
+                draw_image(camera, dst_function, surf)
+                pygame.transform.scale(surf, SIZE, screen)
 
         pygame.display.update()
 
